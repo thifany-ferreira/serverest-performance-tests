@@ -1,0 +1,69 @@
+name: Testes de performance
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      teste:
+        description: "Qual teste rodar"
+        type: choice
+        options:
+          - carga
+          - estresse
+          - smoke
+        default: carga
+
+jobs:
+  k6:
+    name: k6 · ${{ inputs.teste || 'smoke + carga' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - uses: grafana/setup-k6-action@v1
+
+      - name: Subir ServeRest local (a carga nunca vai para a API pública)
+        run: |
+          npx --yes serverest@latest --nodoc --porta 3000 --timeout 3600 > serverest.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -s http://localhost:3000/usuarios > /dev/null && echo "ServeRest no ar" && exit 0
+            sleep 2
+          done
+          echo "ServeRest não subiu" && cat serverest.log && exit 1
+
+      - name: Smoke
+        if: ${{ !inputs.teste || inputs.teste == 'smoke' }}
+        env:
+          K6_WEB_DASHBOARD: "true"
+          K6_WEB_DASHBOARD_EXPORT: reports/smoke-relatorio.html
+        run: k6 run --quiet tests/smoke.js
+
+      - name: Carga
+        if: ${{ !inputs.teste || inputs.teste == 'carga' }}
+        env:
+          K6_WEB_DASHBOARD: "true"
+          K6_WEB_DASHBOARD_EXPORT: reports/carga-relatorio.html
+        run: k6 run --quiet tests/load.js
+
+      - name: Estresse (exploratório, não reprova o pipeline)
+        if: ${{ inputs.teste == 'estresse' }}
+        continue-on-error: true
+        env:
+          K6_WEB_DASHBOARD: "true"
+          K6_WEB_DASHBOARD_EXPORT: reports/estresse-relatorio.html
+        run: k6 run --quiet tests/stress.js
+
+      - name: Resumo no painel
+        if: always()
+        run: cat reports/*-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "Sem resumo (o teste não chegou a rodar)." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: relatorios-k6-${{ github.run_number }}
+          path: reports/
